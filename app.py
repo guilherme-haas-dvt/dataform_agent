@@ -120,7 +120,7 @@ st.markdown("""
 
   /* Botón principal (Rojo Devoteam con efecto Hover) */
   .stButton > button[kind="primary"] {
-    background: #F8282D !important;
+    background: #D91F24 !important;
     color: white !important;
     border: none !important;
     font-weight: 600 !important;
