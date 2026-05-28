@@ -311,10 +311,10 @@ def generar_zip(archivos: dict) -> bytes:
 # SIDEBAR
 # ══════════════════════════════════════════════════════════
 with st.sidebar:
-    st.header("🔌 Configuración de Datos")
+    st.header("Configuración de Datos")
     
     # Selector dinámico de origen
-    origen_metadata = st.selectbox(
+    origen_metadata = st.radio(
         "Origen de Metadatos/Esquema:",
         ["BigQuery (Conexión en vivo)", "Archivo Excel / Sheets local", "Sin esquema (Solo Prompt)"]
     )
@@ -334,7 +334,7 @@ with st.sidebar:
                 st.session_state.df_metadata = pd.read_csv(excel_meta)
             else:
                 st.session_state.df_metadata = pd.read_excel(excel_meta)
-            st.success("✅ Diccionario cargado en memoria")
+            st.success("Diccionario cargado en memoria")
 
     # ── 2. Cargar esquemas ───────────────────────────────
     st.markdown("#### 📦 Esquemas BigQuery")
