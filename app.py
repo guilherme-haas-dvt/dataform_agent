@@ -288,6 +288,8 @@ SELECT
 FROM
     `${{ref("raw_source", "tabla_origen")}}`
 """
+
+# 2. MODO REAL (Ahora sí está bien alineado dentro de la función)
 model = st.session_state.modelo
 contents = []
 
@@ -308,7 +310,7 @@ try:
     return respuesta.text.strip()
 except Exception as e:
     return f"❌ Error de la API de Google: {e}"
-    
+
 # ══════════════════════════════════════════════════════════
 # EXTRACCIÓN Y GUARDADO DE CÓDIGO
 # ══════════════════════════════════════════════════════════
