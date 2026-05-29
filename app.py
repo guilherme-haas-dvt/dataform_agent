@@ -256,60 +256,40 @@ def esquemas_a_contexto(esquemas: list) -> str:
 # FUNCIÓN DE LLAMADA AL MODELO
 # ══════════════════════════════════════════════════════════
 def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: list) -> str:
-    """Llama a Gemini o simula la respuesta de forma inteligente si estamos en modo libre."""
+    """Inicializa Vertex AI y procesa el chat en la zona central capturando los errores de la API."""
     
-    # 1. COMPROBACIÓN REVOLUCIONARIA: Si el usuario NO eligió BigQuery, 
-    # o si por algún motivo el modelo no está listo, ejecutamos el modo libre automático.
-    modo_elegido = st.session_state.get("origen_metadata", "Sin esquema (Solo Prompt)")
-    
-    if modo_elegido != "BigQuery (Conexión en vivo)" or st.session_state.modelo is None:
-        return f"""
-*(Agente funcionando en Modo Libre - Sin conexión GCP)*
+    # Recuperamos el proyecto validado por el panel lateral
+    project_id = st.session_state.get("project_id", "integracion-snp-glue")
 
-He procesado tu requerimiento para generar el código Dataform. Basándome en tu prompt, aquí tienes la estructura base:
+    try:
+        import vertexai
+        from vertexai.generative_models import GenerativeModel, Content, Part
+        
+        # Inicializamos Vertex AI dinámicamente con el proyecto activo
+        vertexai.init(project=project_id, location="us-central1")
+        system_prompt = globals().get("SYSTEM_PROMPT", "Eres un experto en Dataform de Devoteam.")
+        model = GenerativeModel("gemini-1.5-flash", system_instruction=system_prompt)
 
-```sqlx
-config {{
-    type: "table",
-    schema: "stg_custom",
-    description: "Modelo generado en modo libre basado en tu petición."
-}}
+        contents = []
+        if esquema_ctx and not historial:
+            mensaje_con_ctx = f"CONTEXTO DE TABLAS:\n{esquema_ctx}\n\nPETICIÓN:\n{mensaje}"
+        else:
+            mensaje_con_ctx = mensaje
 
-/* PROMPT PROCESADO: 
-  "{mensaje}"
-*/
+        for msg in historial:
+            contents.append(Content(role=msg["role"], parts=[Part.from_text(msg["content"])]))
 
-SELECT
-    id_transaccion,
-    fecha_registro,
-    -- Aquí procesaremos tus reglas de negocio más adelante
-    '{mensaje}' AS regla_aplicada,
-    CURRENT_TIMESTAMP() AS fecha_compilacion
-FROM
-    `${{ref("raw_source", "tabla_origen")}}`
-"""
+        partes_actuales = list(pdf_parts)
+        partes_actuales.append(Part.from_text(mensaje_con_ctx))
+        contents.append(Content(role="user", parts=partes_actuales))
 
-# 2. MODO REAL (Ahora sí está bien alineado dentro de la función)
-model = st.session_state.modelo
-contents = []
+        # Realizamos la llamada real. Aquí saltará el 403 si la API está desactivada
+        respuesta = model.generate_content(contents)
+        return respuesta.text.strip()
 
-if esquema_ctx and not historial:
-    mensaje_con_ctx = f"CONTEXTO DE TABLAS:\n{esquema_ctx}\n\nPETICIÓN:\n{mensaje}"
-else:
-    mensaje_con_ctx = mensaje
-
-for msg in historial:
-    contents.append(Content(role=msg["role"], parts=[Part.from_text(msg["content"])]))
-
-partes_actuales = list(pdf_parts)
-partes_actuales.append(Part.from_text(mensaje_con_ctx))
-contents.append(Content(role="user", parts=partes_actuales))
-
-try:
-    respuesta = model.generate_content(contents)
-    return respuesta.text.strip()
-except Exception as e:
-    return f"❌ Error de la API de Google: {e}"
+    except Exception as e:
+        # El error de la API de Google aparecerá en la parte central como respuesta del chat
+        return f"❌ Error de Vertex AI (IA de Google):\n\n{e}"
 
 # ══════════════════════════════════════════════════════════
 # EXTRACCIÓN Y GUARDADO DE CÓDIGO
@@ -329,135 +309,97 @@ def generar_zip(archivos: dict) -> bytes:
     return buffer.getvalue()
 
 # ══════════════════════════════════════════════════════════
+# GUARDAR CODIGO EN DATAFORM
+# ══════════════════════════════════════════════════════════
+
+def guardar_en_dataform(project_id: str, repository: str, workspace: str, nombre_archivo: str, codigo: str):
+    """Escribe un archivo directamente en el Workspace de Dataform usando la API de Google."""
+    from google.cloud import dataform_v1beta1
+    
+    # Elige la región donde tengas creado tu Dataform (normalmente us-central1 o europe-west3)
+    region = "us-central1" 
+    
+    client = dataform_v1beta1.DataformClient()
+    
+    # Construimos la "dirección exacta" de tu espacio de trabajo en Google Cloud
+    workspace_path = f"projects/{project_id}/locations/{region}/repositories/{repository}/workspaces/{workspace}"
+    
+    # Preparamos la ruta de la carpeta donde van los modelos (definitions/)
+    ruta_final = f"definitions/{nombre_archivo}"
+    
+    # Convertimos el texto del código a bytes para que viaje seguro por internet
+    bytes_codigo = codigo.encode("utf-8")
+    
+    # Creamos la petición de escritura
+    request = dataform_v1beta1.WriteFileRequest(
+        workspace=workspace_path,
+        path=ruta_final,
+        contents=bytes_codigo
+    )
+    
+    # Lanzamos la llamada a la API
+    client.write_file(request=request)
+
+# ══════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════
 with st.sidebar:
-    st.header("Configuración de Datos")
-    
-    # Selector dinámico de origen
-    origen_metadata = st.radio(
-        "Origen de Metadatos/Esquema:",
-        ["BigQuery (Conexión en vivo)", "Archivo Excel / Sheets local", "Sin esquema (Solo Prompt)"],
-        key="origen_metadata"
-    )
-    
-    if origen_metadata == "BigQuery (Conexión en vivo)":
-        project_id = st.text_input("GCP Project ID", value="integracion-snp-glue")
-        dataset_id = st.text_input("Dataset ID", value="MRP_STANDARD")
-        # Aquí mantienes tu lógica actual de conexión a BQ...
-        
-    elif origen_metadata == "Archivo Excel / Sheets local":
-        st.info("Sube un Excel con la estructura de tus tablas (Columnas, PKs, etc.)")
-        excel_meta = st.file_uploader("Subir diccionario de datos:", type=["xlsx", "csv"])
-        
-        # Guardamos el Excel en el estado de la sesión para usarlo luego
-        if excel_meta is not None:
-            if excel_meta.name.endswith('.csv'):
-                st.session_state.df_metadata = pd.read_csv(excel_meta)
-            else:
-                st.session_state.df_metadata = pd.read_excel(excel_meta)
-            st.success("Diccionario cargado en memoria")
+    st.header("🔌 Conexión a BigQuery")
+    st.write("Introduce el entorno de datos para tu proyecto de Dataform.")
 
-    # ── 2. Cargar esquemas ───────────────────────────────
-    st.markdown("#### 📦 Esquemas BigQuery")
+    project_id = st.text_input("GCP Project ID", value="")
+    dataset_id = st.text_input("Dataset ID", value="")
 
-    if st.session_state.bq_conectado:
-        dataset_input = st.text_input("Dataset", placeholder="MRP_STANDARD")
-        
-        # Opción: tabla individual o múltiples
-        modo_carga = st.radio("Cargar:", ["Tabla individual", "Todas las tablas del dataset", "Lista de tablas"])
-        
-        tablas_a_cargar = []
-        
-        if modo_carga == "Tabla individual":
-            tabla_input = st.text_input("Nombre de tabla", placeholder="Z_EVER")
-            if tabla_input: tablas_a_cargar = [tabla_input.strip()]
-        
-        elif modo_carga == "Todas las tablas del dataset":
-            if st.button("🔍 Listar tablas", use_container_width=True):
-                try:
-                    tablas = listar_tablas_dataset(st.session_state.bq_client, st.session_state.project_id, dataset_input)
-                    st.session_state["tablas_listadas"] = tablas
-                    st.success(f"{len(tablas)} tablas encontradas")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-            
-            if "tablas_listadas" in st.session_state:
-                seleccionadas = st.multiselect("Selecciona tablas:", st.session_state["tablas_listadas"])
-                tablas_a_cargar = seleccionadas
-        
-        elif modo_carga == "Lista de tablas":
-            texto_tablas = st.text_area("Tablas (una por línea o separadas por comas):", placeholder="Z_EVER\nZ_BUT000\nZ_ANEP")
-            tablas_a_cargar = [t.strip() for t in texto_tablas.replace(",", "\n").split("\n") if t.strip()]
+    if "conectado" not in st.session_state:
+        st.session_state.conectado = False
 
-        if tablas_a_cargar and dataset_input:
-            if st.button("📥 Cargar esquemas", use_container_width=True):
-                esquemas = []
-                progress = st.progress(0)
-                for i, tabla in enumerate(tablas_a_cargar):
-                    try:
-                        esq = obtener_esquema_tabla(
-                            st.session_state.bq_client,
-                            st.session_state.project_id,
-                            dataset_input, tabla
-                        )
-                        esquemas.append(esq)
-                    except Exception as e:
-                        st.warning(f"⚠️ {tabla}: {e}")
-                    progress.progress(int((i+1)/len(tablas_a_cargar)*100))
+    # El botón ahora SOLO valida BigQuery
+    if st.button("Inicializar Conexión", use_container_width=True):
+        with st.spinner("Verificando acceso a BigQuery..."):
+            try:
+                from google.cloud import bigquery
+                client = bigquery.Client(project=project_id)
+                dataset_ref = client.dataset(dataset_id)
+                client.get_dataset(dataset_ref)  # Valida si existe el dataset
                 
-                st.session_state.esquema_contexto = esquemas_a_contexto(esquemas)
-                st.success(f"✅ {len(esquemas)} esquemas cargados como contexto")
-    else:
-        st.info("Conéctate primero a GCP para cargar esquemas.")
+                st.session_state.conectado = True
+                st.session_state.project_id = project_id
+                st.session_state.dataset_id = dataset_id
+                st.success("¡Estructura de datos localizada!")
+            except Exception as e:
+                st.session_state.conectado = False
+                st.error(f"❌ Error en BigQuery: {e}")
 
-    st.divider()
+    st.write("---")
 
-    # ── 3. Output ────────────────────────────────────────
-    st.markdown("#### 💾 Archivos generados")
-    
-    if st.session_state.archivos_gen:
-        st.caption(f"{len(st.session_state.archivos_gen)} archivo(s)")
-        for nombre in list(st.session_state.archivos_gen.keys())[:5]:
-            st.markdown(f"<div class='file-row'><span class='fname'>📄 {nombre}</span></div>", unsafe_allow_html=True)
-        
-        # Descarga ZIP
-        zip_bytes = generar_zip(st.session_state.archivos_gen)
-        st.download_button(
-            "📦 Descargar todo (ZIP)",
-            data=zip_bytes,
-            file_name="dataform_generated.zip",
-            mime="application/zip",
-            use_container_width=True
+    if st.session_state.conectado:
+        st.markdown(
+            f"""
+            <div style="background-color: #d4edda; padding: 10px; border-radius: 5px; border-left: 5px solid #28a745;">
+                <b style="color: #155724;">🟢 DATASET CONECTADO</b><br>
+                <small style="color: #155724;">Proyecto: {st.session_state.project_id}</small><br>
+                <small style="color: #155724;">Dataset: {st.session_state.dataset_id}</small>
+            </div>
+            """, 
+            unsafe_allow_html=True
         )
-        
-        # Ruta local opcional
-        ruta_local = st.text_input("Guardar también en ruta local:", placeholder=r"C:\proyecto\definitions")
-        if ruta_local and st.button("💾 Guardar en disco", use_container_width=True):
-            os.makedirs(ruta_local, exist_ok=True)
-            for nombre, contenido in st.session_state.archivos_gen.items():
-                with open(os.path.join(ruta_local, nombre), "w", encoding="utf-8") as f:
-                    f.write(contenido)
-            st.success(f"✅ {len(st.session_state.archivos_gen)} archivos guardados")
-        
-        if st.button("🗑️ Limpiar archivos", use_container_width=True):
-            st.session_state.archivos_gen = {}
-            st.rerun()
     else:
-        st.caption("Ningún archivo generado aún.")
-
-    st.divider()
-    if st.button("🔄 Nueva conversación", use_container_width=True):
-        st.session_state.historial        = []
-        st.session_state.esquema_contexto = ""
-        st.rerun()
+        st.markdown(
+            """
+            <div style="background-color: #f8d7da; padding: 10px; border-radius: 5px; border-left: 5px solid #dc3545;">
+                <b style="color: #721c24;">🔴 SIN DATOS</b><br>
+                <small style="color: #721c24;">Configura BigQuery para activar el entorno.</small>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
 
 # ══════════════════════════════════════════════════════════
 # CUERPO PRINCIPAL
 # ══════════════════════════════════════════════════════════
 st.markdown("""
 <div class="main-header">
-  <div style="font-size:36px">⚙️</div>
+  <div style="font-size:30px">⚙️</div>
   <div>
     <h1>Dataform AI Studio</h1>
     <p>Agente conversacional para generar código JS/SQLX · Conecta BQ, sube PDFs y refina el código en chat</p>
@@ -465,40 +407,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Estado de conexión
-col_s1, col_s2, col_s3 = st.columns([1,1,4])
-with col_s1:
-    if st.session_state.bq_conectado:
-        st.markdown(f"<span class='badge-ok'>● BQ conectado — {st.session_state.project_id}</span>", unsafe_allow_html=True)
-    else:
-        st.markdown("<span class='badge-warn'>○ BQ no conectado</span>", unsafe_allow_html=True)
-with col_s2:
-    if st.session_state.esquema_contexto:
-        st.markdown("<span class='badge-ok'>● Esquemas cargados</span>", unsafe_allow_html=True)
-    else:
-        st.markdown("<span class='badge-warn'>○ Sin esquemas</span>", unsafe_allow_html=True)
-
-st.divider()
-
 # ── Tabs ─────────────────────────────────────────────────
-tab_chat, tab_inputs, tab_archivos = st.tabs(["💬 Chat con el Agente", "📎 Inputs adicionales", "📁 Archivos generados"])
+tab_chat, tab_archivos = st.tabs(["💬 Chat con el Agente", "📁 Archivos generados"])
 
 # ══════════════════════════════════════════════════════════
 # TAB 1: CHAT
 # ══════════════════════════════════════════════════════════
 with tab_chat:
-    
-    # Mostrar historial
-    if not st.session_state.historial:
-        st.markdown("""
-        <div style="text-align:center; padding:60px 20px; color:#64748b">
-          <div style="font-size:48px;margin-bottom:16px">🤖</div>
-          <div style="font-size:18px;font-weight:700;color:#e2e8f0;margin-bottom:8px">Dataform Agent</div>
-          <div style="font-size:14px;max-width:500px;margin:0 auto;line-height:1.6">
-            Conecta tu proyecto BQ para dar contexto real, o empieza directamente describiendo qué código necesitas.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
     
     for msg in st.session_state.historial:
         if msg["role"] == "user":
@@ -520,11 +435,10 @@ with tab_chat:
                         html_respuesta += parte.replace("\n", "<br>")
             
             st.markdown(f"<div class='msg-label-agent'>⚙️ AGENTE</div><div class='msg-agent'>{html_respuesta}</div>", unsafe_allow_html=True)
-    
-    st.divider()
 
     # ── Accesos rápidos ──────────────────────────────────
-    st.markdown("**⚡ Accesos rápidos:**")
+    st.markdown("#### ⚡ Accesos rápidos")
+    st.write("Haz clic en una plantilla para ejecutarla automáticamente:")
     cols_quick = st.columns(6)
     quick_options = {
         "📥 Full load":        "Genera el código JS completo para una carga inicial full load (type:table) con postOps para PKs y restauración de metadatos desde la tabla origen.",
@@ -548,26 +462,79 @@ with tab_chat:
         pdf_parts_chat = st.session_state["pdfs_cargados"]
 
     # Pre-rellenar si hay quick prompt pendiente
-    default_input = st.session_state.pop("_pending_prompt", "")
+    if "_pending_prompt" in st.session_state and st.session_state["_pending_prompt"]:
+        st.session_state["chat_input"] = st.session_state.pop("_pending_prompt")
     
+    # Ahora dibujamos la caja. Ya no necesita el parámetro "value" 
+    # porque leerá automáticamente lo que metimos en su "key".
     user_input = st.text_area(
         "Tu petición:",
-        value=default_input,
         height=100,
         placeholder="Ej: 'Genera el operate() con MERGE incremental para Z_EVER usando VERTRAG como PK'",
         key="chat_input"
     )
     
-    col_send, col_clear = st.columns([4,1])
+    st.markdown("#### 📎 Contexto adicional para el agente")
+    st.write("Estos inputs se añaden como contexto en la siguiente petición del chat.")
+
+    col_pdf, col_csv = st.columns(2)
+
+    with col_pdf:
+        st.markdown("#### 📄 PDFs (arquitectura, reglas de negocio, documentación)")
+        pdfs = st.file_uploader(
+            "Sube uno o más PDFs",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="pdf_uploader"
+        )
+        
+        if pdfs:
+            partes_pdf = []
+            for pdf in pdfs:
+                pdf_bytes = pdf.read()
+                pdf.seek(0)
+                partes_pdf.append(Part.from_data(data=pdf_bytes, mime_type="application/pdf"))
+                st.markdown(f"<span class='badge-ok'>✓ {pdf.name}</span>", unsafe_allow_html=True)
+            
+            st.session_state["pdfs_cargados"] = partes_pdf
+            st.success(f"✅ {len(pdfs)} PDF(s) listos para usar en el chat")
+
+    with col_csv:
+        st.markdown("#### 📊 CSV / Sheets (lista de tablas, configuración de PKs)")
+        archivo_tablas = st.file_uploader(
+            "Sube CSV o Excel con la configuración de tablas",
+            type=["csv", "xlsx"],
+            key="csv_uploader"
+        )
+        
+        if archivo_tablas:
+            try:
+                if archivo_tablas.name.endswith(".csv"):
+                    df = pd.read_csv(archivo_tablas)
+                else:
+                    df = pd.read_excel(archivo_tablas)
+                
+                st.dataframe(df.head(10), use_container_width=True)
+                
+                # Convertir a contexto de texto
+                ctx_csv = f"\nConfiguración de tablas desde archivo:\n{df.to_string(index=False)}"
+                st.session_state.esquema_contexto += ctx_csv
+                st.success(f"✅ {len(df)} filas cargadas como contexto")
+                
+            except Exception as e:
+                st.error(f"Error leyendo archivo: {e}")
+    col_send, col_clear, col_deploy = st.columns([2.5, 1, 1])
     with col_send:
-        enviar = st.button("➤ Enviar", type="primary", use_container_width=True)
+        enviar = st.button("➤ Generar Consulta", use_container_width=True)
     with col_clear:
-        if st.button("🗑️ Limpiar chat", use_container_width=True):
+        if st.button("Limpiar chat", use_container_width=True):
             st.session_state.historial = []
             st.rerun()
+    with col_deploy:
+        desplegar = st.button("Desplegar a Dataform", use_container_width=True)
 
     if enviar and user_input.strip():
-        with st.spinner("🧠 Generando..."):
+        with st.spinner("Generando..."):
             try:
                 respuesta = llamar_agente(
                     user_input,
@@ -606,76 +573,67 @@ with tab_chat:
             except Exception as e:
                 st.error(f"❌ Error al llamar al agente: {e}")
 
-# ══════════════════════════════════════════════════════════
-# TAB 2: INPUTS ADICIONALES
-# ══════════════════════════════════════════════════════════
-with tab_inputs:
-    st.markdown("### 📎 Contexto adicional para el agente")
-    st.caption("Estos inputs se añaden como contexto en la siguiente petición del chat.")
-
-    col_pdf, col_csv = st.columns(2)
-
-    with col_pdf:
-        st.markdown("#### 📄 PDFs (arquitectura, reglas de negocio, documentación)")
-        pdfs = st.file_uploader(
-            "Sube uno o más PDFs",
-            type=["pdf"],
-            accept_multiple_files=True,
-            key="pdf_uploader"
-        )
-        
-        if pdfs:
-            partes_pdf = []
-            for pdf in pdfs:
-                pdf_bytes = pdf.read()
-                pdf.seek(0)
-                partes_pdf.append(Part.from_data(data=pdf_bytes, mime_type="application/pdf"))
-                st.markdown(f"<span class='badge-ok'>✓ {pdf.name}</span>", unsafe_allow_html=True)
-            
-            st.session_state["pdfs_cargados"] = partes_pdf
-            st.success(f"✅ {len(pdfs)} PDF(s) listos para usar en el chat")
-
-    with col_csv:
-        st.markdown("#### 📊 CSV / Excel (lista de tablas, configuración de PKs)")
-        archivo_tablas = st.file_uploader(
-            "Sube CSV o Excel con la configuración de tablas",
-            type=["csv", "xlsx"],
-            key="csv_uploader"
-        )
-        
-        if archivo_tablas:
-            try:
-                if archivo_tablas.name.endswith(".csv"):
-                    df = pd.read_csv(archivo_tablas)
-                else:
-                    df = pd.read_excel(archivo_tablas)
-                
-                st.dataframe(df.head(10), use_container_width=True)
-                
-                # Convertir a contexto de texto
-                ctx_csv = f"\nConfiguración de tablas desde archivo:\n{df.to_string(index=False)}"
-                st.session_state.esquema_contexto += ctx_csv
-                st.success(f"✅ {len(df)} filas cargadas como contexto")
-                
-            except Exception as e:
-                st.error(f"Error leyendo archivo: {e}")
-
-    st.divider()
-    st.markdown("#### ✏️ Instrucciones de negocio (texto libre)")
-    reglas = st.text_area(
-        "Reglas, convenciones o requisitos específicos del proyecto:",
-        height=150,
-        placeholder="""Ejemplos:
-- Todos los campos de fecha vienen como BIGNUMERIC en formato SAP (20260420144938.912909)
-- El campo GLDELFLAG indica registros borrados cuando no está vacío
-- Las tablas Z_* son de SAP, las tablas KN* son de clientes
-- Target dataset: MRD_STANDARD, Source: MRP_STANDARD"""
-    )
+    if "archivos_gen" in st.session_state and st.session_state.archivos_gen:
+        st.write("---")
+        st.markdown("#### 🚀 Desplegar directamente a Dataform")
     
-    if reglas and st.button("➕ Añadir al contexto del agente"):
-        st.session_state.esquema_contexto += f"\n\nReglas de negocio del proyecto:\n{reglas}"
-        st.success("✅ Instrucciones añadidas al contexto")
+    # 1. Recuperamos de la memoria el archivo extraído
+        nombre_fichero = list(st.session_state.archivos_gen.keys())[-1]
+        codigo_fichero = st.session_state.archivos_gen[nombre_fichero]
 
+    # 👁️ VISOR DE CÓDIGO REAL (¡Aquí es donde se hace totalmente visible!)
+        st.markdown(f"**📄 Contenido generado para el archivo `{nombre_fichero}`:**")
+    
+    # Detectamos si es SQLX o JS para que Streamlit lo pinte con colores bonitos
+        tipo_lenguaje = "sql" if nombre_fichero.endswith((".sqlx", ".sql")) else "javascript"
+        st.code(codigo_fichero, language=tipo_lenguaje)
+
+
+    # 2. Configuración del destino en Google Cloud (aparece justo abajo del código)
+        st.write("Configura el destino en tu repositorio de GCP antes de enviar:")
+        col_repo, col_work = st.columns(2)
+        with col_repo:
+            repo_input = st.text_input("Repositorio Dataform:", value="mrp-repository")
+        with col_work:
+            work_input = st.text_input("Tu Workspace (Rama Git):", value="desarrollo-compartido")
+
+    # 3. El botón físico de envío
+        if st.button(f"📥 Confirmar e Inyectar `{nombre_fichero}` en GCP", type="primary", use_container_width=True):
+            with st.spinner("Estableciendo conexión con la API de GCP..."):
+                try:
+                    guardar_en_dataform(
+                        project_id=st.session_state.get("project_id", ""),
+                        repository=repo_input,
+                        workspace=work_input,
+                        nombre_archivo=nombre_fichero,
+                        codigo=codigo_fichero
+                    )
+                    st.success(f"🎉 ¡Éxito absoluto! El archivo `{nombre_fichero}` ya ha sido creado en tu Workspace.")
+                except Exception as e:
+                    st.error(f"❌ La API de Dataform rechazó la escritura: {e}")
+
+    if desplegar:
+        # Comprobamos que haya código generado en la memoria antes de intentar subir nada
+        if "archivos_gen" in st.session_state and st.session_state.archivos_gen:
+            with st.spinner("Inyectando código en Google Cloud..."):
+                try:
+                    nombre_fichero = list(st.session_state.archivos_gen.keys())[-1]
+                    codigo_fichero = st.session_state.archivos_gen[nombre_fichero]
+                    
+                    # Llamamos a la API (puedes ajustar el repo y workspace fijos o leerlos del sidebar)
+                    guardar_en_dataform(
+                        project_id=st.session_state.get("project_id", "integracion-snp-glue"),
+                        repository="mrp-repository", 
+                        workspace="desarrollo-compartido",
+                        nombre_archivo=nombre_fichero,
+                        codigo=codigo_fichero
+                    )
+                    st.success(f"✅ ¡El archivo `{nombre_fichero}` se ha desplegado en Dataform correctamente!")
+                except Exception as e:
+                    st.error(f"❌ Error al desplegar: {e}")
+        else:
+            # Si le da al botón sin haber generado código primero, le avisamos
+            st.warning("⚠️ No hay ningún código generado todavía. Pregúntale algo al Agente primero.")
 # ══════════════════════════════════════════════════════════
 # TAB 3: ARCHIVOS GENERADOS
 # ══════════════════════════════════════════════════════════
