@@ -9,11 +9,9 @@ import io
 import json
 import zipfile
 import pandas as pd
-import base64
 from google.cloud import bigquery
 from google.oauth2 import service_account
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part, Content
+import requests
 
 # ══════════════════════════════════════════════════════════
 # CONFIGURACIÓN DE PÁGINA
@@ -75,7 +73,7 @@ st.markdown("""
   }
   
   .msg-agent {
-    background: #FFFFFF; /* Blanco puro para la IA */
+    background: #FFFFFF;
     border: 1px solid #E5E7EB;
     border-radius: 12px 12px 12px 2px;
     padding: 14px 18px;
@@ -102,6 +100,7 @@ st.markdown("""
     margin: 10px 0;
     line-height: 1.7;
   }
+
 
   /* Elementos de Streamlit (Cajas de texto limpias) */
   .stTextInput > div > div > input,
@@ -137,6 +136,7 @@ st.markdown("""
       color: #F8282D !important;
       border-bottom-color: #F8282D !important;
   }
+  
 </style>
 """, unsafe_allow_html=True)
 
@@ -155,7 +155,7 @@ if "modelo"            not in st.session_state: st.session_state.modelo         
 # SYSTEM PROMPT DEL AGENTE
 # ══════════════════════════════════════════════════════════
 SYSTEM_PROMPT = """
-Eres un Arquitecto de Datos Senior experto en Google Cloud, BigQuery y Dataform.
+Eres un Arquitecto de Datos Senior experto en Google Cloud, BigQuery y Dataform para Devoteam.
 Generas código Dataform de alta calidad (JS y SQLX) para cualquier tipo de proyecto.
 
 CONOCIMIENTO TÉCNICO:
@@ -177,119 +177,122 @@ REGLAS DE GENERACIÓN DE CÓDIGO:
 6. Particionamiento condicional con spread operator: ...(tabla.campoParticion ? { bigquery: { partitionBy: DATE_TRUNC(...) } } : {})
 7. Usa SOURCE_PROJECT, SOURCE_DATASET, TARGET_DATASET como constantes arriba del todo
 
-FORMATO DE RESPUESTA:
-- Código en bloques ```javascript o ```sql  
-- Explicación breve después del código (no antes)
-- Si el usuario pide ajustes, modifica SOLO lo necesario y explica el cambio
-- Si faltan datos para generar bien el código, pregunta lo necesario
+REGLAS CRÍTICAS DE COSTES Y FORMATO DE RESPUESTA (OBLIGATORIO):
+1. PROHIBIDO SALUDAR O DESPEDIRSE. No digas 'Hola', 'Aquí tienes', ni 'Espero que te sirva'.
+2. CERO EXPLICACIONES. No justifiques el código ni pongas secciones de "Prácticas recomendadas".
+3. VE DIRECTO AL GRANO. Devuelve MÁXIMO 1 línea de texto introductorio y luego inmediatamente el bloque de código.
+4. FORMATO: El código SIEMPRE debe ir en bloques ```javascript o ```sqlx.
+
+REGLA EXTRA: Cuando uses assertions nonNull sobre una columna, 
+esa columna DEBE estar en el SELECT y GROUP BY de la consulta. 
+Si no es posible incluirla, omite la assertion y avisa al usuario.
 """
 
 # ══════════════════════════════════════════════════════════
 # FUNCIONES DE BIGQUERY
 # ══════════════════════════════════════════════════════════
-def conectar_bq_credenciales(json_key: dict, project_id: str):
-    """Conecta a BQ usando service account JSON."""
-    credentials = service_account.Credentials.from_service_account_info(
-        json_key,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    return bigquery.Client(credentials=credentials, project=project_id)
-
-def conectar_bq_adc(project_id: str):
-    """Conecta a BQ usando Application Default Credentials."""
-    return bigquery.Client(project=project_id)
-
-def obtener_esquema_hibrido(nombre_tabla, origen_seleccionado):
+def obtener_esquema_bq(project, dataset, tabla):
+    client = bigquery.Client(project=project)
+    
+    query = f"""
+        SELECT column_name, data_type, is_nullable
+        FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
+        WHERE table_name = '{tabla}'
+        ORDER BY ordinal_position
     """
-    Devuelve el esquema y las PKs de la tabla, ya sea desde BQ en vivo o desde el Excel subido.
-    """
-    # CASO A: BIGQUERY EN VIVO
-    if origen_seleccionado == "BigQuery (Conexión en vivo)":
-        # Aquí dejas el código exacto que ya tienes escrito que hace:
-        # bq_client.get_table(...) e INFORMATION_SCHEMA
-        # (No lo borres, simplemente mételo dentro de este 'if')
-        pass 
-        
-    # CASO B: EXCEL / SHEETS LOCAL
-    elif origen_seleccionado == "Archivo Excel / Sheets local" and "df_metadata" in st.session_state:
-        df = st.session_state.df_metadata
-        
-        # Imaginemos que tu Excel tiene las columnas: "TABLA", "COLUMNA", "ES_PK"
-        # Filtramos el Excel para quedarnos solo con las filas de la tabla que queremos procesar
-        df_filtrado = df[df['TABLA'].str.upper() == nombre_tabla.upper()]
-        
-        if df_filtrado.empty:
-            return None, []
-            
-        # Extraemos las columnas y las PKs usando Pandas puro (100% offline)
-        columnas = df_filtrado['COLUMNA'].tolist()
-        
-        # Si tienes una columna que indica si es Clave Primaria (ej. 'X' o True)
-        pks = df_filtrado[df_filtrado['ES_PK'].isin(['X', 'true', True, 1])]['COLUMNA'].tolist()
-        
-        return columnas, pks
-        
-    # CASO C: SIN METADATOS
-    return None, []
+    df = client.query(query).to_dataframe()
+    return df.to_string(index=False)
 
 def listar_tablas_dataset(client: bigquery.Client, project: str, dataset: str) -> list:
     """Lista todas las tablas de un dataset."""
     tablas = list(client.list_tables(f"{project}.{dataset}"))
     return [t.table_id for t in tablas]
 
-def esquemas_a_contexto(esquemas: list) -> str:
-    """Convierte lista de esquemas a texto de contexto para el agente."""
-    lineas = []
-    for e in esquemas:
-        lineas.append(f"\n--- TABLA: {e['proyecto']}.{e['dataset']}.{e['tabla']} ---")
-        if e['descripcion_tabla']:
-            lineas.append(f"Descripción: {e['descripcion_tabla']}")
-        if e['pks']:
-            lineas.append(f"PKs definidas: {', '.join(e['pks'])}")
-        lineas.append("Columnas:")
-        for c in e['columnas']:
-            desc = f" — {c['desc']}" if c['desc'] else ""
-            lineas.append(f"  {c['nombre']} ({c['tipo']} {c['modo']}){desc}")
-    return "\n".join(lineas)
+# ══════════════════════════════════════════════════════════
+# FUNCIÓN DE LLAMADA SKILLS EN GITHUB
+# ══════════════════════════════════════════════════════════
+def cargar_skill_github(url_raw):
+    try:
+        r = requests.get(url_raw, timeout=5)
+        return r.text if r.status_code == 200 else ""
+    except:
+        return ""
+
+# URLs de las dos skills públicas: 
+URL_SKILL_1 = "https://raw.githubusercontent.com/devoteamgcloud/dataform-assertions/main/README.md"
 
 # ══════════════════════════════════════════════════════════
 # FUNCIÓN DE LLAMADA AL MODELO
 # ══════════════════════════════════════════════════════════
 def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: list) -> str:
-    """Inicializa Vertex AI y procesa el chat en la zona central capturando los errores de la API."""
+    # 1. Importamos librería
+    from google import genai
+    from google.genai import types
+    import os
     
-    # Recuperamos el proyecto validado por el panel lateral
-    project_id = st.session_state.get("project_id", "integracion-snp-glue")
+    # Descargamos el conocimiento de las dos fuentes públicas
+    skill_assertions = cargar_skill_github(URL_SKILL_1)
+
+    system_prompt = (
+    f"{SYSTEM_PROMPT}\n\n"
+    "REGLA IMPORTANTE: Usa SIEMPRE assertions nativas de Dataform por defecto.\n"
+    "SOLO usa la skill externa si el usuario pide explícitamente 'assertions avanzadas':\n\n"
+    f"SKILL 1 (Aserciones Avanzadas - solo si se pide):\n{skill_assertions}\n\n"
+)
+
+    # Recuperamos  proyecto
+    project_id = st.session_state.get("project_id", "")
+    if not project_id:
+        return "⚠️ Primero conecta tu proyecto en el panel lateral."
 
     try:
-        import vertexai
-        from vertexai.generative_models import GenerativeModel, Content, Part
+        # 2. 
+        client = genai.Client(
+            vertexai=True,
+            project=project_id
+        )
         
-        # Inicializamos Vertex AI dinámicamente con el proyecto activo
-        vertexai.init(project=project_id, location="us-central1")
-        system_prompt = globals().get("SYSTEM_PROMPT", "Eres un experto en Dataform de Devoteam.")
-        model = GenerativeModel("gemini-1.5-flash", system_instruction=system_prompt)
+        if st.session_state.conectado:
+            import re
+            ctx_proyecto = (
+            f"Project ID: {st.session_state.project_id}\n"
+            f"Dataset: {st.session_state.dataset_id}\n\n"
+    )
+            esquema_ctx = ctx_proyecto + esquema_ctx
 
-        contents = []
-        if esquema_ctx and not historial:
-            mensaje_con_ctx = f"CONTEXTO DE TABLAS:\n{esquema_ctx}\n\nPETICIÓN:\n{mensaje}"
-        else:
-            mensaje_con_ctx = mensaje
+            posible_tabla = re.search(r'\b([A-Za-z][A-Za-z0-9_]{2,})\b', mensaje)
+            if posible_tabla:
+                try:
+                    esquema_real = obtener_esquema_bq(
+                        st.session_state.project_id,
+                        st.session_state.dataset_id,
+                        posible_tabla.group(1)
+                    )
+                    esquema_ctx = f"Esquema real de BQ:\n{esquema_real}\n\n{esquema_ctx}"
+                except:
+                    pass
+                     
+        prompt_completo = f"Contexto de tablas:\n{esquema_ctx}\n\nPetición: {mensaje}"
 
-        for msg in historial:
-            contents.append(Content(role=msg["role"], parts=[Part.from_text(msg["content"])]))
-
-        partes_actuales = list(pdf_parts)
-        partes_actuales.append(Part.from_text(mensaje_con_ctx))
-        contents.append(Content(role="user", parts=partes_actuales))
-
-        # Realizamos la llamada real. Aquí saltará el 403 si la API está desactivada
-        respuesta = model.generate_content(contents)
-        return respuesta.text.strip()
+        # 3. Llamamos al modelo
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt_completo)]
+                )
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.2
+            )
+        )
+        
+        return response.text
 
     except Exception as e:
-        # El error de la API de Google aparecerá en la parte central como respuesta del chat
-        return f"❌ Error de Vertex AI (IA de Google):\n\n{e}"
+        return f"❌ Error de Vertex AI: {str(e)}"
 
 # ══════════════════════════════════════════════════════════
 # EXTRACCIÓN Y GUARDADO DE CÓDIGO
@@ -393,7 +396,6 @@ with st.sidebar:
             """, 
             unsafe_allow_html=True
         )
-
 # ══════════════════════════════════════════════════════════
 # CUERPO PRINCIPAL
 # ══════════════════════════════════════════════════════════
@@ -415,27 +417,8 @@ tab_chat, tab_archivos = st.tabs(["💬 Chat con el Agente", "📁 Archivos gene
 # ══════════════════════════════════════════════════════════
 with tab_chat:
     
-    for msg in st.session_state.historial:
-        if msg["role"] == "user":
-            st.markdown(f"<div class='msg-label-user'>TÚ</div><div class='msg-user'>{msg['display']}</div>", unsafe_allow_html=True)
-        else:
-            # Renderizar respuesta del agente: separar código del texto
-            contenido = msg["content"]
-            import re
-            partes = re.split(r'(```(?:javascript|js|sql|sqlx)?\n[\s\S]*?```)', contenido)
+    
             
-            html_respuesta = ""
-            for parte in partes:
-                if parte.startswith("```"):
-                    codigo = re.sub(r'```(?:javascript|js|sql|sqlx)?\n', '', parte)
-                    codigo = re.sub(r'```$', '', codigo).strip()
-                    html_respuesta += f"<div class='code-block'>{codigo}</div>"
-                else:
-                    if parte.strip():
-                        html_respuesta += parte.replace("\n", "<br>")
-            
-            st.markdown(f"<div class='msg-label-agent'>⚙️ AGENTE</div><div class='msg-agent'>{html_respuesta}</div>", unsafe_allow_html=True)
-
     # ── Accesos rápidos ──────────────────────────────────
     st.markdown("#### ⚡ Accesos rápidos")
     st.write("Haz clic en una plantilla para ejecutarla automáticamente:")
@@ -465,15 +448,7 @@ with tab_chat:
     if "_pending_prompt" in st.session_state and st.session_state["_pending_prompt"]:
         st.session_state["chat_input"] = st.session_state.pop("_pending_prompt")
     
-    # Ahora dibujamos la caja. Ya no necesita el parámetro "value" 
-    # porque leerá automáticamente lo que metimos en su "key".
-    user_input = st.text_area(
-        "Tu petición:",
-        height=100,
-        placeholder="Ej: 'Genera el operate() con MERGE incremental para Z_EVER usando VERTRAG como PK'",
-        key="chat_input"
-    )
-    
+
     st.markdown("#### 📎 Contexto adicional para el agente")
     st.write("Estos inputs se añaden como contexto en la siguiente petición del chat.")
 
@@ -523,15 +498,21 @@ with tab_chat:
                 
             except Exception as e:
                 st.error(f"Error leyendo archivo: {e}")
-    col_send, col_clear, col_deploy = st.columns([2.5, 1, 1])
+    
+    user_input = st.text_area(
+        "Tu petición:",
+        height=100,
+        placeholder="Ej: 'Genera el operate() con MERGE incremental para Z_EVER usando VERTRAG como PK'",
+        key="chat_input"
+    )
+    
+    col_send, col_clear= st.columns([2.5, 1])
     with col_send:
         enviar = st.button("➤ Generar Consulta", use_container_width=True)
     with col_clear:
         if st.button("Limpiar chat", use_container_width=True):
             st.session_state.historial = []
             st.rerun()
-    with col_deploy:
-        desplegar = st.button("Desplegar a Dataform", use_container_width=True)
 
     if enviar and user_input.strip():
         with st.spinner("Generando..."):
@@ -573,67 +554,77 @@ with tab_chat:
             except Exception as e:
                 st.error(f"❌ Error al llamar al agente: {e}")
 
+with st.container(border=True):
+    for msg in st.session_state.historial:
+        if msg["role"] == "user":
+            st.markdown(f"<div class='msg-label-user'>TÚ</div><div class='msg-user'>{msg['display']}</div>", unsafe_allow_html=True)
+        else:
+            # Renderizar respuesta del agente: separar código del texto
+            contenido = msg["content"]
+            import re
+            partes = re.split(r'(```(?:javascript|js|sql|sqlx)?\n[\s\S]*?```)', contenido)
+            
+            st.markdown(f"<div class='msg-label-agent'>⚙️ AGENTE</div>", unsafe_allow_html=True)
+            for parte in partes:
+                if parte.startswith("```"):
+                    lang = re.match(r'```(\w+)', parte)
+                    lenguaje = lang.group(1) if lang else "sql"
+                    codigo = re.sub(r'^```[\w]*\n', '', parte)
+                    codigo = re.sub(r'```$', '', codigo).strip()
+                    st.code(codigo, language=lenguaje)
+                else:
+                    if parte.strip():
+                        texto_html = parte.strip().replace('\n', '<br>')
+                        st.markdown(f"<div class='msg-agent'>{texto_html}</div>", unsafe_allow_html=True)
+
     if "archivos_gen" in st.session_state and st.session_state.archivos_gen:
         st.write("---")
-        st.markdown("#### 🚀 Desplegar directamente a Dataform")
+        st.markdown("#### Desplegar directamente a Dataform")
     
-    # 1. Recuperamos de la memoria el archivo extraído
         nombre_fichero = list(st.session_state.archivos_gen.keys())[-1]
         codigo_fichero = st.session_state.archivos_gen[nombre_fichero]
 
-    # 👁️ VISOR DE CÓDIGO REAL (¡Aquí es donde se hace totalmente visible!)
-        st.markdown(f"**📄 Contenido generado para el archivo `{nombre_fichero}`:**")
-    
-    # Detectamos si es SQLX o JS para que Streamlit lo pinte con colores bonitos
-        tipo_lenguaje = "sql" if nombre_fichero.endswith((".sqlx", ".sql")) else "javascript"
-        st.code(codigo_fichero, language=tipo_lenguaje)
-
-
     # 2. Configuración del destino en Google Cloud (aparece justo abajo del código)
         st.write("Configura el destino en tu repositorio de GCP antes de enviar:")
+        nombre_fichero_final = st.text_input(
+        "Nombre del archivo final (puedes cambiarlo):", 
+        value=nombre_fichero,
+        key="input_nombre_magico"
+    )
+
         col_repo, col_work = st.columns(2)
         with col_repo:
-            repo_input = st.text_input("Repositorio Dataform:", value="mrp-repository")
+            repo_input = st.text_input(
+                "Repositorio Dataform:", 
+                value="", 
+            )
         with col_work:
-            work_input = st.text_input("Tu Workspace (Rama Git):", value="desarrollo-compartido")
+            work_input = st.text_input(
+                "Tu Workspace (Rama Git):", 
+                value="", 
+            )
 
-    # 3. El botón físico de envío
-        if st.button(f"📥 Confirmar e Inyectar `{nombre_fichero}` en GCP", type="primary", use_container_width=True):
-            with st.spinner("Estableciendo conexión con la API de GCP..."):
-                try:
-                    guardar_en_dataform(
-                        project_id=st.session_state.get("project_id", ""),
-                        repository=repo_input,
-                        workspace=work_input,
-                        nombre_archivo=nombre_fichero,
-                        codigo=codigo_fichero
-                    )
-                    st.success(f"🎉 ¡Éxito absoluto! El archivo `{nombre_fichero}` ya ha sido creado en tu Workspace.")
-                except Exception as e:
-                    st.error(f"❌ La API de Dataform rechazó la escritura: {e}")
+        st.write("")
+        texto_boton = f"Confirmar e Inyectar fichero en GCP"
+        
+        if st.button(texto_boton):
+            if not repo_input or not work_input:
+                st.error("⚠️ Por favor, rellena el Repositorio y el Workspace antes de inyectar en GCP.")
+            else:
+                with st.spinner("Estableciendo conexión con la API de Dataform..."):
+                    try:
+                        guardar_en_dataform(
+                            project_id=st.session_state.get("project_id", ""),
+                            repository=repo_input,
+                            workspace=work_input,
+                            nombre_archivo=nombre_fichero,
+                            codigo=codigo_fichero
+                        )
+                        st.success(f" El archivo {nombre_fichero} ya ha sido creado.")
+                    except Exception as e:
+                        st.error(f"La API de Dataform rechazó la escritura: {e}")
 
-    if desplegar:
-        # Comprobamos que haya código generado en la memoria antes de intentar subir nada
-        if "archivos_gen" in st.session_state and st.session_state.archivos_gen:
-            with st.spinner("Inyectando código en Google Cloud..."):
-                try:
-                    nombre_fichero = list(st.session_state.archivos_gen.keys())[-1]
-                    codigo_fichero = st.session_state.archivos_gen[nombre_fichero]
-                    
-                    # Llamamos a la API (puedes ajustar el repo y workspace fijos o leerlos del sidebar)
-                    guardar_en_dataform(
-                        project_id=st.session_state.get("project_id", "integracion-snp-glue"),
-                        repository="mrp-repository", 
-                        workspace="desarrollo-compartido",
-                        nombre_archivo=nombre_fichero,
-                        codigo=codigo_fichero
-                    )
-                    st.success(f"✅ ¡El archivo `{nombre_fichero}` se ha desplegado en Dataform correctamente!")
-                except Exception as e:
-                    st.error(f"❌ Error al desplegar: {e}")
-        else:
-            # Si le da al botón sin haber generado código primero, le avisamos
-            st.warning("⚠️ No hay ningún código generado todavía. Pregúntale algo al Agente primero.")
+       
 # ══════════════════════════════════════════════════════════
 # TAB 3: ARCHIVOS GENERADOS
 # ══════════════════════════════════════════════════════════
