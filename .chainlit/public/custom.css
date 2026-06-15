@@ -1,0 +1,17 @@
+body::before {
+    content: "";
+
+    position: fixed;
+    top: 20px;
+    left: 20px;
+
+    width: 180px;
+    height: 60px;
+
+    background-image: url("/public/logo.png");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+
+    z-index: 9999;
+}
