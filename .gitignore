@@ -1,0 +1,9 @@
+git rm --cached .streamlit/secrets.toml
+
+# Añadir al .gitignore
+echo ".streamlit/secrets.toml" >> .gitignore
+
+# Confirmar el cambio
+git add .gitignore
+git commit -m "Ignorar secrets.toml"
+git push
