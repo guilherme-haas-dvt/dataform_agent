@@ -3,7 +3,7 @@ Dataform AI Studio
 Agente conversacional para generar código JS/SQLX para Dataform
 """
 
-import streamlit as st-
+import streamlit as st
 from streamlit_oauth import OAuth2Component
 from google.oauth2.credentials import Credentials
 
