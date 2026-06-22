@@ -3,7 +3,18 @@ Dataform AI Studio
 Agente conversacional para generar código JS/SQLX para Dataform
 """
 
-import streamlit as st
+import streamlit as st-
+from streamlit_oauth import OAuth2Component
+from google.oauth2.credentials import Credentials
+
+# 2. Variables de configuración para Google (Pon esto de momento, luego las cambiaremos por las reales)
+CLIENT_ID = st.secrets["GOOGLE_CLIENT_ID"]
+CLIENT_SECRET = st.secrets["GOOGLE_CLIENT_SECRET"]
+AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/auth"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+SCOPES = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/bigquery"
+
 import os
 import io
 import json
@@ -141,6 +152,32 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
+# CONTROL DE ACCESO (OAUTH)
+# ══════════════════════════════════════════════════════════
+# Inicializamos el componente de login
+oauth2 = OAuth2Component(CLIENT_ID, CLIENT_SECRET, AUTHORIZATION_URL, TOKEN_URL, TOKEN_URL, REVOKE_URL)
+
+# Si el usuario no ha iniciado sesión, detenemos la app y le mostramos el botón
+if "auth" not in st.session_state:
+    st.title("🔒 Acceso Compartido - Dataform AI Studio")
+    st.write("Por favor, inicia sesión con tu cuenta de Devoteam para acceder al agente.")
+    
+    # Este botón redirige a Google y vuelve a la app local (http://localhost:8501)
+    resultado_login = oauth2.authorize_button("Conectar con mi cuenta Devoteam", "http://localhost:8501", SCOPES)
+    
+    if resultado_login:
+        # Si Google dice que el usuario es válido, guardamos sus datos en la sesión
+        st.session_state["auth"] = resultado_login
+        st.rerun()
+    st.stop() # Bloquea el resto de la app hasta que se pulse el botón
+
+# Si llega aquí, es que ya está logueado. Creamos su 'llave' personal:
+token_acceso = st.session_state["auth"]["token"]["access_token"]
+llave_usuario = Credentials(token_acceso)
+
+
+
+# ══════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════
 if "historial"         not in st.session_state: st.session_state.historial         = []
@@ -187,6 +224,23 @@ REGLA EXTRA: Cuando uses assertions nonNull sobre una columna,
 esa columna DEBE estar en el SELECT y GROUP BY de la consulta. 
 Si no es posible incluirla, omite la assertion y avisa al usuario.
 """
+
+# ══════════════════════════════════════════════════════════
+# PERMISOS DE BIGQUERY
+# ══════════════════════════════════════════════════════════
+
+def obtener_esquema_bq(project, dataset, tabla, credenciales):
+    # Añadimos 'credentials=credenciales' para que use el login del usuario
+    client = bigquery.Client(project=project, credentials=credenciales)
+    
+    query = f"""
+        SELECT column_name, data_type, is_nullable
+        FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
+        WHERE table_name = '{tabla}'
+        ORDER BY ordinal_position
+    """
+    df = client.query(query).to_dataframe()
+    return df.to_string(index=False)
 
 # ══════════════════════════════════════════════════════════
 # FUNCIONES DE BIGQUERY
@@ -249,7 +303,8 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
         # 2. 
         client = genai.Client(
             vertexai=True,
-            project=project_id
+            project=project_id,
+            credentials=llave_usuario 
         )
         
         if st.session_state.conectado:
@@ -361,7 +416,7 @@ with st.sidebar:
         with st.spinner("Verificando acceso a BigQuery..."):
             try:
                 from google.cloud import bigquery
-                client = bigquery.Client(project=project_id)
+                client = bigquery.Client(project=project_id, credentials=llave_usuario)
                 dataset_ref = client.dataset(dataset_id)
                 client.get_dataset(dataset_ref)  # Valida si existe el dataset
                 
