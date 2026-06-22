@@ -106,10 +106,10 @@ logo_file_url = "https://www.devoteam.com/wp-content/uploads/2021/01/Devoteam_lo
 default = "light"
 
 [UI.theme.light]
-# primary = "#F8282D"
+primary = "#F8282D"
 
 [UI.theme.dark]
-# primary = "#F8282D"
+primary = "#F8282D"
 
 
 # default_sidebar_state = "open"  # Options: "open", "closed", "hidden"
