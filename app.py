@@ -163,8 +163,7 @@ if "auth" not in st.session_state:
     st.write("Por favor, inicia sesión con tu cuenta de Devoteam para acceder al agente.")
     
     # Este botón redirige a Google y vuelve a la app local (http://localhost:8501)
-    resultado_login = oauth2.authorize_button("Conectar con mi cuenta Devoteam", "http://localhost:8501", SCOPES)
-    
+resultado_login = oauth2.authorize_button("Conectar con mi cuenta Devoteam", "https://tu-app.streamlit.app", SCOPES)    
     if resultado_login:
         # Si Google dice que el usuario es válido, guardamos sus datos en la sesión
         st.session_state["auth"] = resultado_login
