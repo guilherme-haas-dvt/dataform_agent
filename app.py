@@ -165,7 +165,7 @@ if "auth" not in st.session_state:
     # Este botón redirige a Google y vuelve a la app local (http://localhost:8501)
     resultado_login = oauth2.authorize_button(
     "Conectar con mi cuenta Devoteam", 
-    "https://dataformagent-5hlzmcoasxeig7ppsiqb4n.streamlit.app/", 
+    "https://dataformagent-5hlzmcoasxeig7ppsiqb4n.streamlit.app", 
     SCOPES
 )
     
