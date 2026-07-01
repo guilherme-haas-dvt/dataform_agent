@@ -234,7 +234,6 @@ Si no es posible incluirla, omite la assertion y avisa al usuario.
 # ══════════════════════════════════════════════════════════
 
 def obtener_esquema_bq(project, dataset, tabla, credenciales):
-    # Añadimos 'credentials=credenciales' para que use el login del usuario
     client = bigquery.Client(project=project, credentials=credenciales)
     
     query = f"""
@@ -249,17 +248,6 @@ def obtener_esquema_bq(project, dataset, tabla, credenciales):
 # ══════════════════════════════════════════════════════════
 # FUNCIONES DE BIGQUERY
 # ══════════════════════════════════════════════════════════
-def obtener_esquema_bq(project, dataset, tabla):
-    client = bigquery.Client(project=project)
-    
-    query = f"""
-        SELECT column_name, data_type, is_nullable
-        FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
-        WHERE table_name = '{tabla}'
-        ORDER BY ordinal_position
-    """
-    df = client.query(query).to_dataframe()
-    return df.to_string(index=False)
 
 def listar_tablas_dataset(client: bigquery.Client, project: str, dataset: str) -> list:
     """Lista todas las tablas de un dataset."""
@@ -326,10 +314,11 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
                         st.session_state.project_id,
                         st.session_state.dataset_id,
                         posible_tabla.group(1)
+                        llave_usuario
                     )
                     esquema_ctx = f"Esquema real de BQ:\n{esquema_real}\n\n{esquema_ctx}"
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Error en la consulta automática de BQ: {e}") # Ver el error en la terminal
                      
         prompt_completo = f"Contexto de tablas:\n{esquema_ctx}\n\nPetición: {mensaje}"
 

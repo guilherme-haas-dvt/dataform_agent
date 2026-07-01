@@ -13,6 +13,45 @@ from google.cloud import bigquery
 from google import genai
 from google.genai import types
 from pathlib import Path
+from google.oauth2.credentials import Credentials
+from datetime import datetime, timedelta
+from authlib.integrations.starlette_client import OAuth
+from starlette.requests import Request
+from starlette.responses import RedirectResponse
+import secrets
+
+
+
+
+oauth = OAuth()
+oauth.register(
+    name='gcp',
+    client_id=os.environ.get("OAUTH_GOOGLE_CLIENT_ID"),
+    client_secret=os.environ.get("OAUTH_GOOGLE_CLIENT_SECRET"),
+    access_token_url='https://oauth2.googleapis.com/token',
+    authorize_url='https://accounts.google.com/o/oauth2/auth',
+    client_kwargs={
+        'scope': 'openid email profile https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/bigquery'
+    }
+)
+
+# Guardamos tokens temporalmente por "state" hasta que el usuario vuelva al chat
+gcp_tokens_pendientes = {}
+
+@cl.server.app.get("/gcp-login")
+async def gcp_login(request: Request):
+    redirect_uri = request.url_for("gcp_callback")
+    state = secrets.token_urlsafe(16)
+    request.session["gcp_state"] = state
+    return await oauth.gcp.authorize_redirect(request, redirect_uri, state=state)
+
+@cl.server.app.get("/gcp-callback")
+async def gcp_callback(request: Request):
+    token = await oauth.gcp.authorize_access_token(request)
+    state = request.query_params.get("state")
+    gcp_tokens_pendientes[state] = token["access_token"]
+    return RedirectResponse(url="/")
+
 
 # ══════════════════════════════════════════════════════════
 # CONFIGURACIÓN Y PROMPT DEL AGENTE
@@ -52,8 +91,15 @@ REGLAS CRÍTICAS DE COSTES Y FORMATO DE RESPUESTA (OBLIGATORIO):
 # ══════════════════════════════════════════════════════════
 # FUNCIONES BÁSICAS DE LÓGICA (Tus mismas funciones)
 # ══════════════════════════════════════════════════════════
+
+def get_user_credentials():
+    user = cl.user_session.get("user")
+    token = user.metadata.get("oauth_token")
+    creds = Credentials(token=token)
+    return creds
+
 def obtener_esquema_bq(project, dataset, tabla):
-    client = bigquery.Client(project=project)
+    client = bigquery.Client(project=project, credentials=get_user_credentials())
     query = f"""
         SELECT column_name, data_type, is_nullable
         FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
@@ -88,6 +134,21 @@ def guardar_en_dataform(project_id: str, repository: str, workspace: str, nombre
     )
     client.write_file(request=request)
 
+
+
+
+@cl.oauth_callback
+def oauth_callback(
+    provider_id: str,
+    token: str,
+    raw_user_data: dict,
+    default_user: cl.User,
+) -> cl.User | None:
+    if raw_user_data.get("hd") == "devoteam.com":
+        return default_user
+    return None
+
+    
 # ══════════════════════════════════════════════════════════
 # EVENTOS DE CHAINLIT (La nueva interfaz)
 # ══════════════════════════════════════════════════════════
@@ -138,13 +199,16 @@ diseñado para acelerar tus desarrollos en GCP.
             
             try:
                 # Validamos conexión a BigQuery
-                client = bigquery.Client(project=project_id.strip())
+                client = bigquery.Client(project=project_id.strip(), credentials=get_user_credentials())
                 client.get_dataset(dataset_id.strip())
                 cl.user_session.set("bq_conectado", True)
-                await msg.update(content=f"✅ **¡Conexión establecida con éxito!** Estructura de datos localizada.\n\n¿En qué te puedo ayudar hoy con Dataform? _(Recuerda que puedes adjuntar requerimientos en PDF o CSVs usando el clip 📎 aquí abajo)_")
+                msg.content = f"✅ **¡Conexión establecida con éxito!** Estructura de datos localizada.\n\n¿En qué te puedo ayudar hoy con Dataform? _(Recuerda que puedes adjuntar requerimientos en PDF o CSVs usando el clip 📎 aquí abajo)_"
+                await msg.update()
+
             except Exception as e:
                 cl.user_session.set("bq_conectado", False)
-                await msg.update(content=f"❌ **Error al conectar con BigQuery:** `{str(e)}`\n\nPuedes corregir y actualizar los datos en cualquier momento desde el menú de Ajustes (⚙️ arriba a la izquierda).")
+                msg.content = f"❌ **Error al conectar con BigQuery:** `{str(e)}`\n\nPuedes corregir y actualizar los datos en cualquier momento desde el menú de Ajustes (⚙️ arriba a la izquierda)."
+                await msg.update()
     else:
         await cl.Message(content="⚠️ Se agotó el tiempo. Puedes configurar la conexión en el menú de Ajustes (⚙️ arriba a la izquierda) cuando estés listo.", author="Devoteam AI").send()
 
@@ -213,7 +277,7 @@ async def main(message: cl.Message):
     historial = cl.user_session.get("historial")
     partes_usuario = [types.Part.from_text(text=prompt_completo)] + pdf_parts
 
-    client = genai.Client(vertexai=True, project=project_id)
+    client = genai.Client(vertexai=True, project=project_id, credentials=get_user_credentials())
     skill_assertions = cargar_skill_github(URL_SKILL_1)
     
     instrucciones = f"{SYSTEM_PROMPT}\n\nSKILL (Aserciones Avanzadas):\n{skill_assertions}"
@@ -304,6 +368,7 @@ async def on_action(action: cl.Action):
     
     try:
         guardar_en_dataform(project_id, repo, workspace, nombre_fichero, codigo)
-        await msg_espera.update(content=f"✅ ¡Éxito! El código ha sido desplegado directamente en `definitions/{nombre_fichero}` dentro de tu entorno Devoteam GCP.")
+        msg_espera.content = f"✅ ¡Éxito! El código ha sido desplegado directamente en `definitions/{nombre_fichero}` dentro de tu entorno Devoteam GCP."
+        await msg_espera.update()
     except Exception as e:
         await cl.ErrorMessage(content=f"❌ La API rechazó el despliegue: {str(e)}").send()
