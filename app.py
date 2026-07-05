@@ -313,7 +313,7 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
                     esquema_real = obtener_esquema_bq(
                         st.session_state.project_id,
                         st.session_state.dataset_id,
-                        posible_tabla.group(1)
+                        posible_tabla.group(1),
                         llave_usuario
                     )
                     esquema_ctx = f"Esquema real de BQ:\n{esquema_real}\n\n{esquema_ctx}"
