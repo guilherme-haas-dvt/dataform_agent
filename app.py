@@ -229,13 +229,10 @@ esa columna DEBE estar en el SELECT y GROUP BY de la consulta.
 Si no es posible incluirla, omite la assertion y avisa al usuario.
 
 ACCESO A BIGQUERY:
-Tienes acceso en tiempo real al INFORMATION_SCHEMA del proyecto y dataset conectado.
-Cuando el usuario mencione tablas, columnas, o pida un JOIN, consulta automáticamente 
-el esquema real disponible en el contexto para generar código con los campos exactos.
-Si el usuario pide trabajar con varias tablas, usa el esquema de cada una para construir 
-el código correcto — nunca inventes nombres de columnas.
-Si el contexto no incluye el esquema de una tabla que necesitas, indícalo al usuario 
-y pídele que la mencione explícitamente para poder cargarla.
+- Tienes acceso al INFORMATION_SCHEMA real del proyecto y dataset conectado.
+- Cuando el usuario pregunte sobre columnas, tipos o estructura de tablas, 
+  responde directamente con esa información — no generes código para consultarla.
+- Usa el esquema disponible en el contexto para generar código con campos exactos y reales
 """
 
 # ══════════════════════════════════════════════════════════
