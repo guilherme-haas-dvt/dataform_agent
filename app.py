@@ -338,10 +338,11 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
                                 llave_usuario
                             )
                             esquema_ctx = f"Esquema de {tabla}:\n{esquema_real}\n\n{esquema_ctx}"
-                        except:
-                            pass
+                        except Exception as e:
+                            print(f"ERROR obteniendo esquema de {tabla}: {e}")  # ← ver el error real
             except:
-                pass
+                print(f"ERROR listando tablas: {e}")  # ← ver si falla al listar
+
 
         prompt_completo = f"Contexto de tablas:\n{esquema_ctx}\n\nPetición: {mensaje}"
 
