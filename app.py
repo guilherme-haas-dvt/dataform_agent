@@ -343,6 +343,9 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
             except:
                 pass
 
+    prompt_completo = f"Contexto de tablas:\n{esquema_ctx}\n\nPetición: {mensaje}"
+
+
         # 3. Llamamos al modelo
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
