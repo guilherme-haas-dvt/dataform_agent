@@ -343,7 +343,7 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
             except:
                 pass
 
-    prompt_completo = f"Contexto de tablas:\n{esquema_ctx}\n\nPetición: {mensaje}"
+        prompt_completo = f"Contexto de tablas:\n{esquema_ctx}\n\nPetición: {mensaje}"
 
 
         # 3. Llamamos al modelo
