@@ -185,7 +185,7 @@ llave_usuario = Credentials(token_acceso)
 # SESSION STATE
 # ══════════════════════════════════════════════════════════
 if "historial"         not in st.session_state: st.session_state.historial         = []
-if "archivos_gen"      not in st.session_state: st.session_state.archivos_gen      = {}   # {nombre: contenido}
+if "archivos_gen"      not in st.session_state: st.session_state.archivos_gen      = {}   
 if "bq_client"         not in st.session_state: st.session_state.bq_client         = None
 if "bq_conectado"      not in st.session_state: st.session_state.bq_conectado      = False
 if "esquema_contexto"  not in st.session_state: st.session_state.esquema_contexto  = ""
@@ -227,6 +227,15 @@ REGLAS CRÍTICAS DE COSTES Y FORMATO DE RESPUESTA (OBLIGATORIO):
 REGLA EXTRA: Cuando uses assertions nonNull sobre una columna, 
 esa columna DEBE estar en el SELECT y GROUP BY de la consulta. 
 Si no es posible incluirla, omite la assertion y avisa al usuario.
+
+ACCESO A BIGQUERY:
+Tienes acceso en tiempo real al INFORMATION_SCHEMA del proyecto y dataset conectado.
+Cuando el usuario mencione tablas, columnas, o pida un JOIN, consulta automáticamente 
+el esquema real disponible en el contexto para generar código con los campos exactos.
+Si el usuario pide trabajar con varias tablas, usa el esquema de cada una para construir 
+el código correcto — nunca inventes nombres de columnas.
+Si el contexto no incluye el esquema de una tabla que necesitas, indícalo al usuario 
+y pídele que la mencione explícitamente para poder cargarla.
 """
 
 # ══════════════════════════════════════════════════════════
@@ -307,20 +316,32 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
     )
             esquema_ctx = ctx_proyecto + esquema_ctx
 
-            posible_tabla = re.search(r'\b([A-Za-z][A-Za-z0-9_]{2,})\b', mensaje)
-            if posible_tabla:
-                try:
-                    esquema_real = obtener_esquema_bq(
-                        st.session_state.project_id,
-                        st.session_state.dataset_id,
-                        posible_tabla.group(1),
-                        llave_usuario
-                    )
-                    esquema_ctx = f"Esquema real de BQ:\n{esquema_real}\n\n{esquema_ctx}"
-                except Exception as e:
-                    print(f"Error en la consulta automática de BQ: {e}") # Ver el error en la terminal
-                     
-        prompt_completo = f"Contexto de tablas:\n{esquema_ctx}\n\nPetición: {mensaje}"
+            try:
+                bq_client = bigquery.Client(
+                    project=st.session_state.project_id,
+                    credentials=llave_usuario
+                )
+                tablas_reales = listar_tablas_dataset(
+                    bq_client,
+                    st.session_state.project_id,
+                    st.session_state.dataset_id
+                )
+                
+                # Buscar en el mensaje solo tablas que existen de verdad
+                for tabla in tablas_reales:
+                    if tabla.lower() in mensaje.lower():
+                        try:
+                            esquema_real = obtener_esquema_bq(
+                                st.session_state.project_id,
+                                st.session_state.dataset_id,
+                                tabla,
+                                llave_usuario
+                            )
+                            esquema_ctx = f"Esquema de {tabla}:\n{esquema_real}\n\n{esquema_ctx}"
+                        except:
+                            pass
+            except:
+                pass
 
         # 3. Llamamos al modelo
         response = client.models.generate_content(
