@@ -1,5 +1,5 @@
 """
-Devoteam Dataform AI Studio - Versión Chainlit (SaaS Profesional)
+Devoteam Dataform AI Studio - Versión Chainlit (Nativa)
 Agente conversacional para generar código JS/SQLX para Dataform
 """
 
@@ -10,51 +10,37 @@ import re
 import pandas as pd
 import requests
 from google.cloud import bigquery
+from google.cloud import dataform_v1beta1
 from google import genai
 from google.genai import types
-from pathlib import Path
 from google.oauth2.credentials import Credentials
-from datetime import datetime, timedelta
-from authlib.integrations.starlette_client import OAuth
-from starlette.requests import Request
-from starlette.responses import RedirectResponse
-import secrets
 
+# ══════════════════════════════════════════════════════════
+# 1. EL "MURO" DE SEGURIDAD (OAUTH NATIVO DE CHAINLIT)
+# ══════════════════════════════════════════════════════════
+@cl.oauth_callback
+def oauth_callback(
+    provider_id: str,
+    token: str,
+    raw_user_data: dict,
+    default_user: cl.User,
+) -> cl.User | None:
+    if raw_user_data.get("hd") == "devoteam.com":
+        # ¡ESTA ES LA LÍNEA NUEVA QUE FALTA! Guardamos el token en el usuario
+        default_user.metadata["oauth_token"] = token
+        return default_user
+    return None
 
-
-
-oauth = OAuth()
-oauth.register(
-    name='gcp',
-    client_id=os.environ.get("OAUTH_GOOGLE_CLIENT_ID"),
-    client_secret=os.environ.get("OAUTH_GOOGLE_CLIENT_SECRET"),
-    access_token_url='https://oauth2.googleapis.com/token',
-    authorize_url='https://accounts.google.com/o/oauth2/auth',
-    client_kwargs={
-        'scope': 'openid email profile https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/bigquery'
-    }
-)
-
-# Guardamos tokens temporalmente por "state" hasta que el usuario vuelva al chat
-gcp_tokens_pendientes = {}
-
-@cl.server.app.get("/gcp-login")
-async def gcp_login(request: Request):
-    redirect_uri = request.url_for("gcp_callback")
-    state = secrets.token_urlsafe(16)
-    request.session["gcp_state"] = state
-    return await oauth.gcp.authorize_redirect(request, redirect_uri, state=state)
-
-@cl.server.app.get("/gcp-callback")
-async def gcp_callback(request: Request):
-    token = await oauth.gcp.authorize_access_token(request)
-    state = request.query_params.get("state")
-    gcp_tokens_pendientes[state] = token["access_token"]
-    return RedirectResponse(url="/")
+def get_user_credentials():
+    """Extrae el token del usuario activo para que BigQuery y Vertex funcionen con su identidad."""
+    user = cl.user_session.get("user")
+    if user and "oauth_token" in user.metadata:
+        return Credentials(token=user.metadata["oauth_token"])
+    return None
 
 
 # ══════════════════════════════════════════════════════════
-# CONFIGURACIÓN Y PROMPT DEL AGENTE
+# 2. CONFIGURACIÓN Y PROMPT DEL AGENTE
 # ══════════════════════════════════════════════════════════
 URL_SKILL_1 = "https://raw.githubusercontent.com/devoteamgcloud/dataform-assertions/main/README.md"
 
@@ -89,15 +75,8 @@ REGLAS CRÍTICAS DE COSTES Y FORMATO DE RESPUESTA (OBLIGATORIO):
 """
 
 # ══════════════════════════════════════════════════════════
-# FUNCIONES BÁSICAS DE LÓGICA (Tus mismas funciones)
+# 3. FUNCIONES BÁSICAS DE LÓGICA (GCP)
 # ══════════════════════════════════════════════════════════
-
-def get_user_credentials():
-    user = cl.user_session.get("user")
-    token = user.metadata.get("oauth_token")
-    creds = Credentials(token=token)
-    return creds
-
 def obtener_esquema_bq(project, dataset, tabla):
     client = bigquery.Client(project=project, credentials=get_user_credentials())
     query = f"""
@@ -121,9 +100,8 @@ def extraer_bloques_codigo(texto: str) -> list:
     return re.findall(patron, texto)
 
 def guardar_en_dataform(project_id: str, repository: str, workspace: str, nombre_archivo: str, codigo: str):
-    from google.cloud import dataform_v1beta1
     region = "us-central1" 
-    client = dataform_v1beta1.DataformClient()
+    client = dataform_v1beta1.DataformClient(credentials=get_user_credentials())
     workspace_path = f"projects/{project_id}/locations/{region}/repositories/{repository}/workspaces/{workspace}"
     ruta_final = f"definitions/{nombre_archivo}"
     bytes_codigo = codigo.encode("utf-8")
@@ -134,57 +112,25 @@ def guardar_en_dataform(project_id: str, repository: str, workspace: str, nombre
     )
     client.write_file(request=request)
 
-
-
-
-@cl.oauth_callback
-def oauth_callback(
-    provider_id: str,
-    token: str,
-    raw_user_data: dict,
-    default_user: cl.User,
-) -> cl.User | None:
-    if raw_user_data.get("hd") == "devoteam.com":
-        return default_user
-    return None
-
-    
 # ══════════════════════════════════════════════════════════
-# EVENTOS DE CHAINLIT (La nueva interfaz)
+# 4. EVENTOS DE CHAINLIT (La Interfaz del Chat)
 # ══════════════════════════════════════════════════════════
 @cl.on_chat_start
 async def start_chat():
-    """Se ejecuta cuando el usuario entra en la aplicación."""
     cl.user_session.set("historial", [])
     cl.user_session.set("esquema_contexto", "")
     cl.user_session.set("archivos_gen", {})
 
-    settings = await cl.ChatSettings(
-        [
-            cl.input_widget.TextInput(id="project_id", label="GCP Project ID", initial=""),
-            cl.input_widget.TextInput(id="dataset_id", label="Dataset ID", initial=""),
-            cl.input_widget.TextInput(id="repo_df", label="Repositorio Dataform (Para Deploy)", initial=""),
-            cl.input_widget.TextInput(id="workspace_df", label="Workspace Dataform (Rama)", initial="")
-        ]
-    ).send()
-
+    # Chainlit ya validó el login de Google antes de mostrar esta pantalla, vamos directo al grano.
     await cl.Message(
-        content="""
- **¡Bienvenido a Devoteam Dataform AI Studio!**
-
-Soy el agente corporativo experto en ingeniería de datos,
-diseñado para acelerar tus desarrollos en GCP.
-""",
-
+        content="**¡Bienvenido a Devoteam Dataform AI Studio!**\n\nSoy el agente corporativo experto en ingeniería de datos, diseñado para acelerar tus desarrollos en GCP.",
         author="Devoteam AI"
     ).send()
 
-
     # ── ONBOARDING CONVERSACIONAL PARA BQ ──
-    res_project = await cl.AskUserMessage(content=" Para inicializar el entorno seguro, por favor envíame tu **GCP Project ID**:", timeout=120).send()
+    res_project = await cl.AskUserMessage(content="Para inicializar el entorno seguro, por favor envíame tu **GCP Project ID**:", timeout=120).send()
     
     if res_project:
-        # Extraer el contenido del mensaje
         project_id = res_project.content if hasattr(res_project, 'content') else res_project.get('content', res_project.get('output', ''))
         cl.user_session.set("project_id", project_id.strip())
         
@@ -202,49 +148,26 @@ diseñado para acelerar tus desarrollos en GCP.
                 client = bigquery.Client(project=project_id.strip(), credentials=get_user_credentials())
                 client.get_dataset(dataset_id.strip())
                 cl.user_session.set("bq_conectado", True)
-                msg.content = f"✅ **¡Conexión establecida con éxito!** Estructura de datos localizada.\n\n¿En qué te puedo ayudar hoy con Dataform? _(Recuerda que puedes adjuntar requerimientos en PDF o CSVs usando el clip 📎 aquí abajo)_"
+                msg.content = "✅ **¡Conexión establecida con éxito!** Estructura de datos localizada.\n\n¿En qué te puedo ayudar hoy con Dataform? _(Recuerda que puedes adjuntar requerimientos en PDF o CSVs usando el clip 📎 aquí abajo)_"
                 await msg.update()
-
             except Exception as e:
                 cl.user_session.set("bq_conectado", False)
-                msg.content = f"❌ **Error al conectar con BigQuery:** `{str(e)}`\n\nPuedes corregir y actualizar los datos en cualquier momento desde el menú de Ajustes (⚙️ arriba a la izquierda)."
+                msg.content = f"❌ **Error al conectar con BigQuery:** `{str(e)}`\n\nPuedes corregir y actualizar los datos escribiendo el ID correcto."
                 await msg.update()
     else:
-        await cl.Message(content="⚠️ Se agotó el tiempo. Puedes configurar la conexión en el menú de Ajustes (⚙️ arriba a la izquierda) cuando estés listo.", author="Devoteam AI").send()
-
-@cl.on_settings_update
-async def setup_agent(settings):
-    """Se ejecuta cuando el usuario guarda los ajustes manualmente en la tuerca ⚙️."""
-    project_id = settings["project_id"]
-    dataset_id = settings["dataset_id"]
-    
-    cl.user_session.set("project_id", project_id)
-    cl.user_session.set("dataset_id", dataset_id)
-    cl.user_session.set("repo_df", settings["repo_df"])
-    cl.user_session.set("workspace_df", settings["workspace_df"])
-
-    if project_id and dataset_id:
-        try:
-            client = bigquery.Client(project=project_id)
-            client.get_dataset(dataset_id)
-            cl.user_session.set("bq_conectado", True)
-            await cl.Toast(content=f"✅ Conectado a BigQuery ({dataset_id})", duration=3).send()
-        except Exception as e:
-            cl.user_session.set("bq_conectado", False)
-            await cl.ErrorMessage(content=f"❌ Error al conectar con BQ: {str(e)}").send()
+        await cl.Message(content="⚠️ Se agotó el tiempo. Recarga la página cuando estés listo.", author="Devoteam AI").send()
 
 @cl.on_message
 async def main(message: cl.Message):
-    """Se ejecuta cada vez que el usuario escribe un mensaje general."""
-    
     project_id = cl.user_session.get("project_id")
     if not project_id:
-        await cl.Message(content="⚠️ Por favor, configura tu Project ID en los ajustes (⚙️) antes de hablar conmigo.", author="Devoteam AI").send()
+        await cl.Message(content="⚠️ Por favor, recarga la página e indica tu Project ID antes de hablar conmigo.", author="Devoteam AI").send()
         return
 
     contexto_archivos = ""
     pdf_parts = []
     
+    # Procesamiento de archivos adjuntos (PDFs o CSVs con el clip 📎)
     if message.elements:
         for element in message.elements:
             if "pdf" in element.mime:
@@ -260,6 +183,8 @@ async def main(message: cl.Message):
                     await cl.ErrorMessage(content=f"Error leyendo {element.name}: {e}").send()
 
     esquema_ctx = cl.user_session.get("esquema_contexto", "") + contexto_archivos
+    
+    # Si BQ está conectado, interceptamos el nombre de la tabla en el mensaje
     if cl.user_session.get("bq_conectado"):
         ctx_proyecto = f"Project ID: {project_id}\nDataset: {cl.user_session.get('dataset_id')}\n\n"
         esquema_ctx = ctx_proyecto + esquema_ctx
@@ -277,6 +202,7 @@ async def main(message: cl.Message):
     historial = cl.user_session.get("historial")
     partes_usuario = [types.Part.from_text(text=prompt_completo)] + pdf_parts
 
+    # Cliente de Gemini (Vertex AI)
     client = genai.Client(vertexai=True, project=project_id, credentials=get_user_credentials())
     skill_assertions = cargar_skill_github(URL_SKILL_1)
     
@@ -306,10 +232,12 @@ async def main(message: cl.Message):
         await cl.ErrorMessage(content=f"❌ Error de Vertex AI: {str(e)}").send()
         return
 
+    # Guardar historial
     historial.append({"role": "user", "content": message.content})
     historial.append({"role": "assistant", "content": respuesta_completa})
     cl.user_session.set("historial", historial)
 
+    # Extraer código generado y preparar el botón de Despliegue en GCP
     bloques = extraer_bloques_codigo(respuesta_completa)
     if bloques:
         archivos_gen = cl.user_session.get("archivos_gen")

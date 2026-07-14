@@ -346,7 +346,7 @@ def llamar_agente(mensaje: str, historial: list, esquema_ctx: str, pdf_parts: li
 
         # 3. Llamamos al modelo
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
+            model="gemini-3.5-flash",
             contents=[
                 types.Content(
                     role="user",
